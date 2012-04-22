@@ -1281,7 +1281,7 @@ AMX.prototype.jit = function() {
     
     f += 'function CHKSTACK() {if(stk > this.stp) {throw new AMX.Error("AMX_ERR_STACKLOW");}}';
     
-    f += "while(true){\n";
+    f += "w: while(true){\n";
     
     f += "switch(cip) {\n";
     
@@ -1301,6 +1301,8 @@ AMX.prototype.jit = function() {
     }
     
     GETPARAM = GETPARAM.bind(this);
+    
+    var jumps = [0];
     
     while(cip < this.codesize) {
         var op = this.buffer.readInt32LE(this.base.cod + cip);
@@ -1395,8 +1397,10 @@ AMX.prototype.jit = function() {
                 f += "PUSH(" + GETPARAM() + ");";
                 break;
             case OP_JSGEQ:
+                t = GETPARAM();
+                jumps.push(t);
                 f += "if(pri >= alt) {" +
-                "    cip = " + GETPARAM() + ";" +
+                "    cip = " + t + ";" +
                 //"console.log('At " + (cip - AMX_CELL_SIZE) + ", jumping to ' + cip + '.');" +
                 "break;" +
                 "}"; 
@@ -1409,17 +1413,24 @@ AMX.prototype.jit = function() {
                 f += "data.writeInt32LE((data.readInt32LE(" + t + " + frm) + 1) >> 0, " + t + " + frm);";
                 break;
             case OP_JUMP:
-                f += "cip = " + GETPARAM() + ";" +
+                t = GETPARAM();
+                jumps.push(t);
+                f += "cip = " + t + ";" +
                 "break;";
                 break;
             case OP_PROC:
+                jumps.push(cip);
                 f += "PUSH(frm);" +
                 "frm = stk;" +
                 "CHKMARGIN();";
                 break;
             case OP_CALL:
-                f += "PUSH(" + (cip + AMX_CELL_SIZE * 2) + ");" +
-                "cip = " + GETPARAM() + ";" +
+                t = cip + AMX_CELL_SIZE * 2;
+                jumps.push(t);
+                f += "PUSH(" + t + ");"
+                t = GETPARAM();
+                jumps.push(t);
+                f += "cip = " + t + ";" +
                 "break;";
                 break;
             case OP_ADD_C:
@@ -1435,16 +1446,20 @@ AMX.prototype.jit = function() {
                 f += "pri = (pri + alt) >> 0;";
                 break;
             case OP_JNZ:
+                t = GETPARAM();
+                jumps.push(t);
                 f += "if(pri != 0) {" +
-                "    cip = " + GETPARAM() + ";" +
+                "    cip = " + t + ";" +
                 "break;}";
                 break;
             case OP_ZERO_PRI:
                 f += "pri = 0;";
                 break;
             case OP_JSLEQ:
+                t = GETPARAM();
+                jumps.push(t);
                 f += "if(pri <= alt) {" +
-                "    cip = " + GETPARAM() + ";" +
+                "    cip = " + t + ";" +
                 "break;}";
                 break;
             default:
@@ -1454,6 +1469,18 @@ AMX.prototype.jit = function() {
     }
     
     f += "\ndefault: console.log('Unknown cip: ' + cip); return;}}";
+    
+    var r = /case (\d+):/g;
+    var repl = function(m, n) {
+        if(jumps.indexOf(Number(n)) == -1) {
+            return "";
+        } else {
+            return m;
+        }
+    };
+    
+    // remove any unused cases
+    f = f.replace(r, repl);
     
     this.jittedFunc = new Function("pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, code, data, codesize",
         f);
