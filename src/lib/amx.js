@@ -29,6 +29,10 @@ function AMX() {
     this.error = 0;
     this.pri = 0;
     this.sysreq_d = 0;
+    this.publics = [];
+    this.natives = [];
+    this.buffer = null;
+    this.callbacks = {};
 }
 
 const AMX_COMPACTMARGIN = 64;
@@ -358,6 +362,18 @@ AMX.init = function(buffer) {
     
     data.writeInt32LE(0, hdr.stp - hdr.dat - AMX_CELL_SIZE);
     
+    var numPublics = (hdr.natives - hdr.publics) / hdr.defsize;
+    
+    for(var i = 0; i < numPublics; i++) {
+        amx.publics[i] = new FuncStub(amx, hdr.publics, i);
+    }
+    
+    var numNatives = (hdr.libraries - hdr.natives) / hdr.defsize;
+    
+    for(var i = 0; i < numNatives; i++) {
+        amx.natives[i] = new FuncStub(amx, hdr.natives, i);
+    }
+    
     return amx;
 }
 
@@ -386,7 +402,19 @@ AMX.prototype.exec = function(index) {
     reset_stk = stk;
     reset_hea = hea;
     alt = frm = pri = 0;
+    var address;
     
+    if(parseInt(index).toString() != index.toString()) {
+        for(i = 0; i < this.publics.length; i++) {
+            if(this.publics[i].name == index) {
+                index = i;
+                break;
+            }
+        }
+        if(typeof index == "string") {
+            throw new AMX.Error("Can't find public function" + index);
+        }
+    }
     
     this.error = new AMX.Error("AMX_ERR_NONE", "");
     
@@ -411,7 +439,7 @@ AMX.prototype.exec = function(index) {
             throw new AMX.Error("AMX_ERR_INDEX", "");
         }
         
-        cip = new FuncStub(this.buffer.slice(hdr.publics + index * hdr.defsize)).address;
+        cip = this.publics[index].address;
         
         console.log("Cip at " + cip);
     }
@@ -435,7 +463,7 @@ AMX.prototype.exec = function(index) {
     }
     
     function GETPARAM() {
-        console.log("Param: " + code.readInt32LE(cip));
+        //console.log("Param: " + code.readInt32LE(cip));
         var param = code.readInt32LE(cip);
         cip += AMX_CELL_SIZE;
         return param;
@@ -456,9 +484,9 @@ AMX.prototype.exec = function(index) {
     while(true) {
         op = code.readInt32LE(cip);
         cip += AMX_CELL_SIZE;
-        console.log("Instruction: " + AMX.OPCODES[op]);
+        //console.log("Instruction: " + AMX.OPCODES[op]);
         switch(op) {
-            case OP_NOP:
+            case OP_NONE:
                 break;
             case OP_LOAD_PRI:
                 pri = data.readInt32LE(GETPARAM());
@@ -582,7 +610,7 @@ AMX.prototype.exec = function(index) {
                 pri = pri * AMX_CELL_SIZE + alt;
                 break;
             case OP_IDXADDR_B:
-                pri = (pri << GETMARAP()) + alt;
+                pri = (pri << GETPARAM()) + alt;
                 break;
             case OP_ALIGN_PRI:
                 offs = GETPARAM();
@@ -1098,10 +1126,6 @@ AMX.prototype.exec = function(index) {
                     return;
                 }
                 break;
-            case OP_SYSREQ_D:
-                GETPARAM();
-                throw new AMX.Error("SYSREQ_D not implemented");
-                break;
             case OP_LINE:
                 GETPARAM();
                 GETPARAM();
@@ -1130,6 +1154,8 @@ AMX.prototype.exec = function(index) {
                     cip = code.readInt32LE(cptr + AMX_CELL_SIZE);
                 }
                 break;
+            case OP_CASETBL:
+                throw new AMX.Error("Invalid opcode", "OP_CASETBL should not be in the token stream.")
             case OP_SWAP_PRI:
                 offs = data.readInt32(stk);
                 data.writeInt32(pri, stk);
@@ -1143,12 +1169,295 @@ AMX.prototype.exec = function(index) {
             case OP_PUSHADDR:
                 PUSH(frm + GETPARAM());
                 break;
+            case OP_NOP:
+                break;
+            case OP_SYSREQ_D:
+                GETPARAM();
+                throw new AMX.Error("SYSREQ_D not implemented");
+                break;
+            case OP_SYMTAG:
+                break;
             case OP_BREAK:
                 break;
             default:
                 throw new AMX.Error("AMX_ERR_INVINSTR", "Unknown opcode");
         }
     }
+}
+
+AMX.prototype.exec2 = function(index) {
+    if(!this.jittedFunc) {
+        console.log("JIT it first!");
+        return;
+    }
+    function PUSH(v) {
+        stk -= AMX_CELL_SIZE;
+        data.writeInt32LE(v, stk);
+    }
+    var hdr;
+    var code, data;
+    var pri, alt, stk, frm, hea;
+    var reset_stk, reset_hea, cip;
+    var codesize;
+    var i;
+    var op;
+    var offs;
+    var num;
+    
+    if(typeof this.callback != "function") {
+        throw AMX.Error("AMX_ERR_CALLBACK", "");
+    }
+    
+    hdr = this.base;
+    assert(hdr.magic == AMX.MAGIC);
+    codesize = this.codesize;
+    code = this.code;
+    data = this.buffer.slice(hdr.dat);
+    hea = this.hea;
+    stk = this.stk;
+    reset_stk = stk;
+    reset_hea = hea;
+    alt = frm = pri = 0;
+    var address;
+    
+    if(parseInt(index).toString() != index.toString()) {
+        for(i = 0; i < this.publics.length; i++) {
+            if(this.publics[i].name == index) {
+                index = i;
+                break;
+            }
+        }
+        if(typeof index == "string") {
+            throw new AMX.Error("Can't find public function" + index);
+        }
+    }
+    
+    this.error = new AMX.Error("AMX_ERR_NONE", "");
+    
+    if(index == AMX_EXEC_MAIN) {
+        if(hdr.cip < 0) {
+            throw new AMX.Error("AMX_ERR_INDEX", "");
+        }
+        cip = this.cip;
+    } else if(index == -2) {
+        frm = this.frm;
+        stk = this.stk;
+        hea = this.hea;
+        pri = this.pri;
+        alt = this.alt;
+        reset_stk = this.reset_stk;
+        reset_hea = this.reset_hea;
+        cip = this.cip;
+    } else if(index < 0) {
+        throw new AMX.Error("AMX_ERR_INDEX", "index < 0");
+    } else {
+        if(index >= (hdr.natives - hdr.publics) / hdr.defsize) {
+            throw new AMX.Error("AMX_ERR_INDEX", "");
+        }
+        
+        cip = this.publics[index].address;
+        
+        console.log("Cip at " + cip);
+    }
+    
+    if(index != AMX_EXEC_CONT) {
+        reset_stk += this.paramcount * AMX_CELL_SIZE;
+        PUSH(this.paramcount * AMX_CELL_SIZE);
+        this.paramcount = 0;
+        PUSH(0);
+    }
+    
+    return this.jittedFunc(pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, code, data, codesize);
+}
+
+AMX.prototype.jit = function() {
+    var f = "";
+    f += "var offs, num;";
+    f += "const AMX_CELL_SIZE = " + AMX_CELL_SIZE + ";";
+    f += "function PUSH(v) {stk -= AMX_CELL_SIZE;data.writeInt32LE(v, stk);}"
+    f += "function POP() {var ret = data.readInt32LE(stk);stk += AMX_CELL_SIZE;return ret;}";
+    
+    f += 'function CHKMARGIN() {if(hea + 16 * AMX_CELL_SIZE > stk) {throw new AMX.Error("AMX_ERR_STACKERR");}}';
+    
+    f += 'function CHKSTACK() {if(stk > this.stp) {throw new AMX.Error("AMX_ERR_STACKLOW");}}';
+    
+    f += "while(true){\n";
+    
+    f += "switch(cip) {\n";
+    
+    var cip = 0;
+    var t;
+    function NEXT(n) {
+        if(!n) {
+            cip += AMX_CELL_SIZE;
+        } else {
+            cip += AMX_CELL_SIZE * n;
+        }
+    }
+    
+    function GETPARAM() {
+        cip += AMX_CELL_SIZE;
+        return this.buffer.readInt32LE(this.base.cod + cip);
+    }
+    
+    GETPARAM = GETPARAM.bind(this);
+    
+    while(cip < this.codesize) {
+        var op = this.buffer.readInt32LE(this.base.cod + cip);
+        f += "\ncase " + cip + ":" + "/*" + AMX.OPCODES[op] + "*/" + "\n";
+        switch(op) {
+            case OP_NONE:
+               break;
+            case OP_LOAD_PRI:
+                f += "pri = data.readInt32LE(" + GETPARAM() + ");";
+                break;
+            case OP_LOAD_ALT:
+                f += "alt = data.readInt32LE(" + GETPARAM() + ")";
+                break;
+            case OP_LOAD_S_PRI:
+                f += "pri = data.readInt32LE(frm + " + GETPARAM() + ");";
+                break;
+            case OP_LOAD_S_ALT:
+                f += "alt = data.readInt32LE(frm + " + GETPARAM() + ");";
+                break;
+            case OP_LREF_PRI:
+                f += "pri = data.readInt32LE(data.readInt32LE(" + GETPARAM() + "));"
+                break;
+            case OP_LREF_ALT:
+                f += "alt = data.readInt32LE(data.readInt32LE(" + GETPARAM() + "));";
+                break;
+            case OP_LREF_S_PRI:
+                f += "pri = data.readInt32LE(data.readInt32LE(frm + " + GETPARAM() + "));";
+                break;
+            case OP_LREF_S_ALT:
+                f += "alt = data.readInt32LE(data.readInt32LE(frm + " + GETPARAM()+ "));";
+                break;
+            case OP_HALT:
+                f += "offs = " + GETPARAM() + ";" +
+                "this.frm = frm;" +
+                "this.pri = pri;" +
+                "this.alt = alt;" +
+                "this.cip = " + (cip + AMX_CELL_SIZE) + ";" +
+                "this.stk = reset_stk;" +
+                "this.hea = reset_hea;" +
+                "return pri;"
+                break;
+            case OP_RETN:
+                f += "frm = POP();" +
+                "offs = POP();" + 
+                "if(offs >= codesize) {" +
+                '    throw new AMX.Error("AMX_ERR_MEMACCESS", "offs >= codesize");' +
+                "}" +
+                "cip = offs;" +
+                "stk += data.readInt32LE(stk) + AMX_CELL_SIZE;" +
+                "this.stk = stk;" +
+                //"console.log('At " + cip + ", jumping to ' + cip + '.');" +
+                "break;";
+                break;
+            case OP_STACK:
+                f += "alt = stk;" +
+                "stk += " + GETPARAM() + ";" +
+                "CHKMARGIN();" +
+                "CHKSTACK();";
+                break;
+            case OP_SUB_ALT:
+                f += "pri = (alt - pri) >> 0;";
+                break;
+            case OP_BREAK:
+                break;
+            case OP_STOR_S_PRI:
+                f += "data.writeInt32LE(pri, frm + " + GETPARAM() + ");";
+                break;
+            case OP_SYSREQ_C:
+                f += "offs = " + GETPARAM() + ";" + 
+                "this.cip = " + (cip + AMX_CELL_SIZE) + ";" +
+                "this.hea = hea;" +
+                "this.frm = frm; " +
+                "this.stk = stk;" +
+                "num = this.callback(offs, data.slice(stk));" +
+                'if(typeof num.pri == "number") {' +
+                "    pri = num.pri;" +
+                "}" +
+                "if(num.num != 0 /* AMX_ERR_NONE */) {" +
+                "    if(num.num == 12 /* AMX_ERR_SLEEP */) {" +
+                "        this.pri = pri;" +
+                "        this.alt = alt;" +
+                "        this.reset_stk = reset_stk;" +
+                "        this.reset_hea = reset_hea;" +
+                "        return;" +
+                "    }" +
+                "    this.reset_stk = reset_stk;" +
+                "    this.reset_hea = reset_hea;" +
+                "    return;" +
+                "}";
+                break;
+            case OP_PUSH_C:
+                f += "PUSH(" + GETPARAM() + ");";
+                break;
+            case OP_JSGEQ:
+                f += "if(pri >= alt) {" +
+                "    cip = " + GETPARAM() + ";" +
+                //"console.log('At " + (cip - AMX_CELL_SIZE) + ", jumping to ' + cip + '.');" +
+                "break;" +
+                "}"; 
+                break;
+            case OP_CONST_ALT:
+                f += "alt = " + GETPARAM() + ";";
+                break;
+            case OP_INC_S:
+                t = GETPARAM();
+                f += "data.writeInt32LE((data.readInt32LE(" + t + " + frm) + 1) >> 0, " + t + " + frm);";
+                break;
+            case OP_JUMP:
+                f += "cip = " + GETPARAM() + ";" +
+                "break;";
+                break;
+            case OP_PROC:
+                f += "PUSH(frm);" +
+                "frm = stk;" +
+                "CHKMARGIN();";
+                break;
+            case OP_CALL:
+                f += "PUSH(" + (cip + AMX_CELL_SIZE * 2) + ");" +
+                "cip = " + GETPARAM() + ";" +
+                "break;";
+                break;
+            case OP_ADD_C:
+                f += "pri = (pri + " + GETPARAM() + ") >> 0;";
+                break;
+            case OP_PUSH_PRI:
+                f += "PUSH(pri);";
+                break;
+            case OP_POP_ALT:
+                f += "alt = POP();";
+                break;
+            case OP_ADD:
+                f += "pri = (pri + alt) >> 0;";
+                break;
+            case OP_JNZ:
+                f += "if(pri != 0) {" +
+                "    cip = " + GETPARAM() + ";" +
+                "break;}";
+                break;
+            case OP_ZERO_PRI:
+                f += "pri = 0;";
+                break;
+            case OP_JSLEQ:
+                f += "if(pri <= alt) {" +
+                "    cip = " + GETPARAM() + ";" +
+                "break;}";
+                break;
+            default:
+                throw new AMX.Error("Unknown opcode", AMX.OPCODES[op]);
+        }
+        NEXT();
+    }
+    
+    f += "\ndefault: console.log('Unknown cip: ' + cip); return;}}";
+    
+    this.jittedFunc = new Function("pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, code, data, codesize",
+        f);
+    
 }
 
 function memcmp(buffer1, offset1, buffer2, offset2, length) {
@@ -1161,9 +1470,16 @@ function memcmp(buffer1, offset1, buffer2, offset2, length) {
 }
 
 AMX.prototype.callback = function(pri, stk) {
-    console.log("Callback called.");
+    var name = this.natives[pri].name;
+    if(typeof this.callbacks[name] == "function") {
+        pri = this.callbacks[name](stk);
+    } else {
+        console.log("Native function " + name + " was called with " + stk.readInt32LE(0) + " arguments, but alas, it is not defined.");
+    }
+    
     return {
-        num: 0
+        num: 0,
+        pri: pri
     };
 }
 
@@ -1216,6 +1532,8 @@ function expand(code, codesize, memsize) {
 }
 
 AMX.Error = function(amxError, elaboration) {
+    console.log(amxError);
+    console.log(elaboration);
     Error.call(this, amxError + ": " + elaboration);
 }
 
@@ -1261,17 +1579,24 @@ AMX.fromFile = function(file, callback) {
     });
 }
 
-function FuncStub(buffer) {
-    if(!Buffer.isBuffer(buffer)) {
-        buffer = new Buffer(FuncStub.BYTE_SIZE);
+function FuncStub(amx, offset, index) {
+    var name = "";
+    var nameofs = 0;
+    if(amx.base.defsize == FuncStub.SIZEOF_FUNCSTUBNT) {
+        nameofs = amx.buffer.readInt32LE(offset + index * FuncStub.SIZEOF_FUNCSTUBNT + 4);
+    } else {
+        nameofs = offset + index * FuncStub.SIZEOF_FUNCSTUB + 4;
     }
-    if(buffer.length < FuncStub.BYTE_SIZE) {
-        throw new Error("Buffer size is less than FuncStub size");
+    for(var c = amx.buffer[nameofs]; c; c = amx.buffer[++nameofs]) {
+        name += String.fromCharCode(c);
     }
-    this.buffer = buffer;
-    this.nameOffset = 4;
-    this.name = buffer.slice(4, 24);
-}
+    this.name = name;
+    this.buffer = amx.buffer.slice(offset + index * amx.base.defsize);
+    this.index = index;
+ }
+
+FuncStub.SIZEOF_FUNCSTUB = 20;
+FuncStub.SIZEOF_FUNCSTUBNT = 8;
 
 Object.defineProperty(FuncStub.prototype, "address", {
     get: function() {
@@ -1285,7 +1610,7 @@ Object.defineProperty(FuncStub.prototype, "address", {
 });
 
 
-FuncStub.BYTE_SIZE = AMX_CELL_SIZE + sEXPMAX + 1;
+
 
 exports.AMX = AMX;
 exports.AMXHeader = AMXHeader;
