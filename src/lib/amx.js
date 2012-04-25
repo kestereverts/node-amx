@@ -1190,20 +1190,19 @@ AMX.prototype.exec2 = function(index) {
         console.log("JIT it first!");
         return;
     }
-    function PUSH(v) {
-        stk -= AMX_CELL_SIZE;
-        data.writeInt32LE(v, stk);
-    }
+    
     var hdr;
-    var code, data;
+    var data = this.data;
     var pri, alt, stk, frm, hea;
     var reset_stk, reset_hea, cip;
     var codesize;
     var i;
-    var op;
-    var offs;
-    var num;
     
+    function PUSH(v) {
+        stk--;
+        data[stk] = v;
+    }
+
     if(typeof this.callback != "function") {
         throw AMX.Error("AMX_ERR_CALLBACK", "");
     }
@@ -1211,14 +1210,16 @@ AMX.prototype.exec2 = function(index) {
     hdr = this.base;
     assert(hdr.magic == AMX.MAGIC);
     codesize = this.codesize;
-    code = this.code;
-    data = this.buffer.slice(hdr.dat);
-    hea = this.hea;
-    stk = this.stk;
+    //data = this.buffer.slice(hdr.dat);
+    
+    
+    
+    
+    hea = this.hea >> 2;
+    stk = this.stk >> 2;
     reset_stk = stk;
     reset_hea = hea;
     alt = frm = pri = 0;
-    var address;
     
     if(parseInt(index).toString() != index.toString()) {
         for(i = 0; i < this.publics.length; i++) {
@@ -1240,9 +1241,9 @@ AMX.prototype.exec2 = function(index) {
         }
         cip = this.cip;
     } else if(index == -2) {
-        frm = this.frm;
-        stk = this.stk;
-        hea = this.hea;
+        frm = this.frm >> 2;
+        stk = this.stk >> 2;
+        hea = this.hea >> 2;
         pri = this.pri;
         alt = this.alt;
         reset_stk = this.reset_stk;
@@ -1267,21 +1268,32 @@ AMX.prototype.exec2 = function(index) {
         PUSH(0);
     }
     
-    return this.jittedFunc(pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, code, data, codesize);
+    return this.jittedFunc(pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, data, codesize);
 }
 
 AMX.prototype.jit = function() {
+    var hdr = this.base;
+    var datasize = hdr.stp - hdr.dat;
+    var data = new Array(datasize >> 2);
+    for(var i = 0; i < datasize; i += AMX_CELL_SIZE) {
+        data[i >> 2] = this.buffer.readInt32LE(hdr.dat + i);
+    }
+    
+    this.data = Object.seal(data);
+    
     var f = "";
+    f += "var assert = require('assert');";
+    f += "assert(Array.isArray(data)); assert(Object.isSealed(data));";
     f += "var offs, num;";
     f += "const AMX_CELL_SIZE = " + AMX_CELL_SIZE + ";";
-    f += "function PUSH(v) {stk -= AMX_CELL_SIZE;data.writeInt32LE(v, stk);}"
-    f += "function POP() {var ret = data.readInt32LE(stk);stk += AMX_CELL_SIZE;return ret;}";
+    f += "function PUSH(v) {data[--stk] = v;}"
+    f += "function POP() {return data[stk++];}";
     
-    f += 'function CHKMARGIN() {if(hea + 16 * AMX_CELL_SIZE > stk) {throw new AMX.Error("AMX_ERR_STACKERR");}}';
-    
-    f += 'function CHKSTACK() {if(stk > this.stp) {throw new AMX.Error("AMX_ERR_STACKLOW");}}';
-    
-    f += "w: while(true){\n";
+    f += 'function CHKMARGIN() {if(hea > stk) {throw new Error("AMX_ERR_STACKERR hea: " + hea + ", stk: ", + stk + ")");}}';
+    f += 'CHKMARGIN = CHKMARGIN.bind(this);'
+    f += 'function CHKSTACK() {if(stk > (this.stp >> 2)) {throw new Error("AMX_ERR_STACKLOW (stk: " + stk + ", stp: " + (this.stp>>2) + ")");}}';
+    f += 'CHKSTACK = CHKSTACK.bind(this);';
+    f += "while(true){\n";
     
     f += "switch(cip) {\n";
     
@@ -1311,32 +1323,32 @@ AMX.prototype.jit = function() {
             case OP_NONE:
                break;
             case OP_LOAD_PRI:
-                f += "pri = data.readInt32LE(" + GETPARAM() + ");";
+                f += "pri = data[" + GETPARAM() / AMX_CELL_SIZE + "];";
                 break;
             case OP_LOAD_ALT:
-                f += "alt = data.readInt32LE(" + GETPARAM() + ")";
+                f += "alt = data[" + GETPARAM() / AMX_CELL_SIZE + "]";
                 break;
             case OP_LOAD_S_PRI:
-                f += "pri = data.readInt32LE(frm + " + GETPARAM() + ");";
+                f += "pri = data[frm + " + GETPARAM() / AMX_CELL_SIZE + "];";
                 break;
             case OP_LOAD_S_ALT:
-                f += "alt = data.readInt32LE(frm + " + GETPARAM() + ");";
+                f += "alt = data[frm + " + GETPARAM() / AMX_CELL_SIZE + "];";
                 break;
             case OP_LREF_PRI:
-                f += "pri = data.readInt32LE(data.readInt32LE(" + GETPARAM() + "));"
+                f += "pri = data[(data[" + GETPARAM() / AMX_CELL_SIZE + "]];";
                 break;
             case OP_LREF_ALT:
-                f += "alt = data.readInt32LE(data.readInt32LE(" + GETPARAM() + "));";
+                f += "alt = data[(data[" + GETPARAM() / AMX_CELL_SIZE + "]];";
                 break;
             case OP_LREF_S_PRI:
-                f += "pri = data.readInt32LE(data.readInt32LE(frm + " + GETPARAM() + "));";
+                f += "pri = data[(data[frm + " + GETPARAM() / AMX_CELL_SIZE + "]];";
                 break;
             case OP_LREF_S_ALT:
-                f += "alt = data.readInt32LE(data.readInt32LE(frm + " + GETPARAM()+ "));";
+                f += "alt = data[(data[frm + " + GETPARAM() / AMX_CELL_SIZE + "]];";
                 break;
             case OP_HALT:
                 f += "offs = " + GETPARAM() + ";" +
-                "this.frm = frm;" +
+                "this.frm = frm << 2;" +
                 "this.pri = pri;" +
                 "this.alt = alt;" +
                 "this.cip = " + (cip + AMX_CELL_SIZE) + ";" +
@@ -1348,17 +1360,20 @@ AMX.prototype.jit = function() {
                 f += "frm = POP();" +
                 "offs = POP();" + 
                 "if(offs >= codesize) {" +
-                '    throw new AMX.Error("AMX_ERR_MEMACCESS", "offs >= codesize");' +
+                '    throw new Error("AMX_ERR_MEMACCESS", "offs >= codesize");' +
                 "}" +
                 "cip = offs;" +
-                "stk += data.readInt32LE(stk) + AMX_CELL_SIZE;" +
-                "this.stk = stk;" +
+                //"assert(stk % 4 == 0, 'OP_RETN1');" + 
+                "stk += (data[stk] >> 2) + 1;" +
+                //"assert(stk % 4 == 0, 'OP_RETN2');" + 
+                "this.stk = stk << 2;" +
                 //"console.log('At " + cip + ", jumping to ' + cip + '.');" +
                 "break;";
                 break;
             case OP_STACK:
                 f += "alt = stk;" +
-                "stk += " + GETPARAM() + ";" +
+                //"assert(stk % 4 == 0, 'OP_STACK1');" + 
+                "stk += " + (GETPARAM() >> 2) + "; /*assert(stk % 4 == 0, 'OP_STACK2');*/" +
                 "CHKMARGIN();" +
                 "CHKSTACK();";
                 break;
@@ -1368,15 +1383,15 @@ AMX.prototype.jit = function() {
             case OP_BREAK:
                 break;
             case OP_STOR_S_PRI:
-                f += "data.writeInt32LE(pri, frm + " + GETPARAM() + ");";
+                f += "data[frm + " + GETPARAM() / AMX_CELL_SIZE + "] = pri;";
                 break;
             case OP_SYSREQ_C:
                 f += "offs = " + GETPARAM() + ";" + 
                 "this.cip = " + (cip + AMX_CELL_SIZE) + ";" +
-                "this.hea = hea;" +
-                "this.frm = frm; " +
-                "this.stk = stk;" +
-                "num = this.callback(offs, data.slice(stk));" +
+                "this.hea = hea << 2;" +
+                "this.frm = frm << 2; " +
+                "this.stk = stk << 2;" +
+                "num = this.callback(offs, this.buffer.slice(this.base.dat + (stk << 2)));" +
                 'if(typeof num.pri == "number") {' +
                 "    pri = num.pri;" +
                 "}" +
@@ -1409,8 +1424,8 @@ AMX.prototype.jit = function() {
                 f += "alt = " + GETPARAM() + ";";
                 break;
             case OP_INC_S:
-                t = GETPARAM();
-                f += "data.writeInt32LE((data.readInt32LE(" + t + " + frm) + 1) >> 0, " + t + " + frm);";
+                t = GETPARAM() / AMX_CELL_SIZE;
+                f += "data[frm + " + t + "] = (data[frm + " + t + "] + 1) >> 0;";
                 break;
             case OP_JUMP:
                 t = GETPARAM();
@@ -1482,7 +1497,7 @@ AMX.prototype.jit = function() {
     // remove any unused cases
     f = f.replace(r, repl);
     
-    this.jittedFunc = new Function("pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, code, data, codesize",
+    this.jittedFunc = new Function("pri, alt, stk, frm, hea, reset_stk, reset_hea, cip, data, codesize",
         f);
     
 }
